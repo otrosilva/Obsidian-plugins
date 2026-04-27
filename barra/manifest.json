@@ -1,0 +1,10 @@
+{
+  "id": "barra",
+  "name": "Barrita",
+  "version": "1.0.0",
+  "minAppVersion": "0.15.0",
+  "description": "Añade barras de progreso automáticas a tareas con subtareas.",
+  "author": "Jose",
+  "authorUrl": "",
+  "isDesktopOnly": false
+}

@@ -1,0 +1,15 @@
+/*
+ * Reporte Finanzas — estilos opcionales
+ * Este plugin genera texto plano en bloques de código,
+ * por lo que no requiere CSS especial.
+ * Puedes usar este archivo para personalizar la apariencia
+ * de los bloques generados si usas un tema personalizado.
+ */
+
+/* Ejemplo: hacer los bloques de código del reporte más compactos */
+/*
+.markdown-preview-view pre {
+  font-size: 0.85em;
+  line-height: 1.4;
+}
+*/

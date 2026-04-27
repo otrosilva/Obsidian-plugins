@@ -1,0 +1,10 @@
+{
+  "id": "reporte-finanzas",
+  "name": "Reporte Finanzas",
+  "version": "1.0.0",
+  "minAppVersion": "1.4.0",
+  "description": "Genera tablas de ingresos y gastos desde datos de hledger. Actívalo con 'reporte: true' en el frontmatter YAML. Soporta tipos de cambio RUBUSD, EURUSD y RUBEUR.",
+  "author": "Jon",
+  "authorUrl": "",
+  "isDesktopOnly": true
+}
