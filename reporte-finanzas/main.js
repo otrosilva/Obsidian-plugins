@@ -1,15 +1,23 @@
 /*
  * Reporte Finanzas — Plugin para Obsidian
  *
- * Activación: propiedad YAML  reporte: true
+ * Activación: propiedad YAML  reporte: true  (o 1, verdadero, yes, si)
+ *
+ * Moneda principal/secundaria (opcional):
+ *   moneda: RUB, USD   → principal rublos, secundaria dólares  (por defecto)
+ *   moneda: USD, RUB   → principal dólares, secundaria rublos
+ *   moneda: EUR, USD   → principal euros, secundaria dólares
+ *   (cualquier combinación de RUB, USD, EUR)
+ *
  * Tipos de cambio opcionales en YAML:
- *   RUBUSD: 90    (cuántos ₽ vale 1 USD, por defecto 80)
- *   EURUSD: 0.90  (cuántos EUR vale 1 USD)
- *   RUBEUR: 100   (cuántos ₽ vale 1 EUR)
+ *   RUBUSD: 90    (₽ por 1 USD,  por defecto 90)
+ *   RUBEUR: 95    (₽ por 1 EUR,  por defecto 95)
+ *   EURUSD: 1.05  (EUR por 1 USD, por defecto 1.05)
+ *   Si defines RUBEUR + EURUSD se calcula RUBUSD automáticamente.
  *
  * El reporte se escribe ENCIMA del separador "----".
  * Los datos van DEBAJO del separador "----".
- * Se actualiza automáticamente al dejar de escribir (debounce 500ms).
+ * Se actualiza al dejar de escribir (500ms) y al cambiar el frontmatter.
  */
 
 'use strict';
@@ -20,22 +28,65 @@ const { Plugin, MarkdownView } = require('obsidian');
 // TIPOS DE CAMBIO
 // ═══════════════════════════════════════════════════════════════
 
-const DEFAULT_RUBUSD = 80; // ₽ por 1 USD
+const DEFAULTS = {
+	RUBUSD: 90,   // ₽ por 1 USD
+	RUBEUR: 95,   // ₽ por 1 EUR
+	EURUSD: 1.05, // EUR por 1 USD
+};
 
-function getRates(frontmatter) {
-	// Devuelve cuántos ₽ equivalen a 1 USD
-	if (!frontmatter) return DEFAULT_RUBUSD;
+function getRates(fm) {
+	// Devuelve objeto { rubusd, rubeur, eurusd } todos como float
+	const rubusd = fm?.RUBUSD ? Number(fm.RUBUSD) : null;
+	const rubeur = fm?.RUBEUR ? Number(fm.RUBEUR) : null;
+	const eurusd = fm?.EURUSD ? Number(fm.EURUSD) : null;
 
-	if (frontmatter.RUBUSD) return Number(frontmatter.RUBUSD);
+	// Calcular los que falten con los que tengamos
+	let _rubusd = rubusd || DEFAULTS.RUBUSD;
+	let _rubeur = rubeur || DEFAULTS.RUBEUR;
+	let _eurusd = eurusd || DEFAULTS.EURUSD;
 
-	// Si tenemos RUBEUR y EURUSD podemos calcular
-	if (frontmatter.RUBEUR && frontmatter.EURUSD) {
-		const rubEur = Number(frontmatter.RUBEUR);   // ₽ por 1 EUR
-		const eurUsd = Number(frontmatter.EURUSD);   // EUR por 1 USD
-		return rubEur / eurUsd;                      // ₽ por 1 USD
-	}
+	if (rubeur && eurusd && !rubusd) _rubusd = rubeur / eurusd;
+	if (rubusd && eurusd && !rubeur) _rubeur = rubusd * eurusd;
+	if (rubusd && rubeur && !eurusd) _eurusd = rubeur / rubusd;
 
-	return DEFAULT_RUBUSD;
+	return { rubusd: _rubusd, rubeur: _rubeur, eurusd: _eurusd };
+}
+
+// Convierte cualquier cantidad a la moneda destino
+function convert(amount, fromCur, toCur, rates) {
+	if (fromCur === toCur) return amount;
+	// Primero convertir a RUB, luego a destino
+	let inRub = amount;
+	if (fromCur === 'USD') inRub = amount * rates.rubusd;
+	if (fromCur === 'EUR') inRub = amount * rates.rubeur;
+	if (toCur === 'RUB') return inRub;
+	if (toCur === 'USD') return inRub / rates.rubusd;
+	if (toCur === 'EUR') return inRub / rates.rubeur;
+	return amount;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// MONEDA PRINCIPAL / SECUNDARIA
+// ═══════════════════════════════════════════════════════════════
+
+const CURRENCY_SYMBOL = { RUB: '₽', USD: '$', EUR: '€' };
+const CURRENCY_NAMES  = { RUB: 'RUB', USD: 'USD', EUR: 'EUR' };
+
+function parseCurrency(fm) {
+	// Devuelve { primary, secondary }
+	// Por defecto: primary=RUB, secondary=USD
+	const raw = fm?.moneda || fm?.currency || '';
+	const parts = String(raw).toUpperCase().split(/[\s,;\/]+/).map(s => s.trim()).filter(Boolean);
+	const valid = ['RUB', 'USD', 'EUR'];
+	const primary   = valid.includes(parts[0]) ? parts[0] : 'RUB';
+	const secondary = valid.includes(parts[1]) && parts[1] !== primary ? parts[1] : (primary === 'RUB' ? 'USD' : 'RUB');
+	return { primary, secondary };
+}
+
+function fmtCurrency(amount, currency) {
+	const sym = CURRENCY_SYMBOL[currency] || currency;
+	const rounded = Math.round(amount).toLocaleString('es-RU');
+	return currency === 'USD' ? `$${rounded}` : `${rounded} ${sym}`;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -56,18 +107,18 @@ function parseCSVLine(line) {
 }
 
 function parseAmount(str) {
-	// Devuelve { rub, usd } como números positivos
-	if (!str || str === '0') return { rub: 0, usd: 0 };
-	let rub = 0, usd = 0;
+	// Devuelve { rub, usd, eur } como números positivos
+	if (!str || str === '0') return { rub: 0, usd: 0, eur: 0 };
+	let rub = 0, usd = 0, eur = 0;
 	for (const part of str.split(',').map(s => s.trim())) {
 		const m = part.match(/([-\d.]+)\s*(RUB|USD|EUR)/);
 		if (!m) continue;
 		const v = Math.abs(parseFloat(m[1]));
 		if (m[2] === 'RUB') rub += v;
 		else if (m[2] === 'USD') usd += v;
-		// EUR lo ignoramos aquí — se convierte al mostrar
+		else if (m[2] === 'EUR') eur += v;
 	}
-	return { rub, usd };
+	return { rub, usd, eur };
 }
 
 function parseSection(block) {
@@ -90,7 +141,6 @@ function parseSection(block) {
 }
 
 function extractSections(dataBlock) {
-	// Divide el bloque en secciones delimitadas por ━━━ nombre ━━━
 	const re = /━{10,}[\s\S]*?\n\s*(\w+)\s*\n[\s\S]*?━{10,}/g;
 	const sections = {};
 	const positions = [];
@@ -100,10 +150,6 @@ function extractSections(dataBlock) {
 	}
 	for (let i = 0; i < positions.length; i++) {
 		const { name, end } = positions[i];
-		const nextStart = i + 1 < positions.length
-			? positions[i + 1].end - positions[i + 1].end  // recalculated below
-			: dataBlock.length;
-		// Buscar el inicio del siguiente bloque ━━━ para saber hasta dónde llega éste
 		const nextBlockStart = i + 1 < positions.length
 			? dataBlock.indexOf('━━━', end + 1)
 			: dataBlock.length;
@@ -133,7 +179,7 @@ function groupByWeek(rows) {
 		if (!r.date) continue;
 		const d = new Date(r.date + 'T00:00:00');
 		if (isNaN(d)) continue;
-		const dow = d.getDay() === 0 ? 7 : d.getDay(); // lunes=1
+		const dow = d.getDay() === 0 ? 7 : d.getDay();
 		const mon = new Date(d);
 		mon.setDate(d.getDate() - dow + 1);
 		const key = mon.toISOString().slice(0, 10);
@@ -143,22 +189,27 @@ function groupByWeek(rows) {
 	return acc;
 }
 
-function sumRows(rows) {
-	let rub = 0, usd = 0;
+// Suma filas y convierte todo a la moneda destino
+function sumRowsIn(rows, toCur, rates) {
+	let total = 0;
 	for (const r of rows) {
 		const a = parseAmount(r.amount);
-		rub += a.rub;
-		usd += a.usd;
+		total += convert(a.rub, 'RUB', toCur, rates);
+		total += convert(a.usd, 'USD', toCur, rates);
+		total += convert(a.eur, 'EUR', toCur, rates);
 	}
-	return { rub, usd };
+	return total;
 }
 
-function sumByCategory(rows) {
+function sumByCategory(rows, toCur, rates) {
 	const acc = {};
 	for (const r of rows) {
 		const cat = r.account.replace(/^expenses:/, '');
 		if (!acc[cat]) acc[cat] = 0;
-		acc[cat] += parseAmount(r.amount).rub;
+		const a = parseAmount(r.amount);
+		acc[cat] += convert(a.rub, 'RUB', toCur, rates);
+		acc[cat] += convert(a.usd, 'USD', toCur, rates);
+		acc[cat] += convert(a.eur, 'EUR', toCur, rates);
 	}
 	return acc;
 }
@@ -185,10 +236,6 @@ function weekLabel(isoMonday) {
 	return `${p(d)}–${p(end)}`;
 }
 
-function fmt(n) {
-	return Math.round(n).toLocaleString('es-RU');
-}
-
 function bar(value, max, width) {
 	width = width || 24;
 	if (max <= 0) return '░'.repeat(width);
@@ -200,9 +247,13 @@ function bar(value, max, width) {
 // GENERACIÓN DEL REPORTE
 // ═══════════════════════════════════════════════════════════════
 
-function generateReport(sections, rubPerUsd) {
+function generateReport(sections, rates, currencies) {
+	const { primary, secondary } = currencies;
+	const symP = CURRENCY_SYMBOL[primary];
+	const symS = CURRENCY_SYMBOL[secondary];
+
 	const expRows = sections.expenses || [];
-	const incRows = sections.income  || [];
+	const incRows = sections.income   || [];
 
 	const expByMonth = groupByMonth(expRows);
 	const incByMonth = groupByMonth(incRows);
@@ -215,48 +266,62 @@ function generateReport(sections, rubPerUsd) {
 
 	// ── Totales por mes ─────────────────────────────────────────
 	const monthData = months.map(m => {
-		const exp = sumRows(expByMonth[m] || []);
-		const inc = sumRows(incByMonth[m] || []);
-		return { key: m, label: monthLabel(m), exp, inc };
+		const expP = sumRowsIn(expByMonth[m] || [], primary,   rates);
+		const expS = sumRowsIn(expByMonth[m] || [], secondary, rates);
+		const incP = sumRowsIn(incByMonth[m] || [], primary,   rates);
+		const incS = sumRowsIn(incByMonth[m] || [], secondary, rates);
+		return { key: m, label: monthLabel(m), expP, expS, incP, incS };
 	});
 
-	const maxExpRub = Math.max(...monthData.map(m => m.exp.rub), 1);
-	const maxIncUsd = Math.max(...monthData.map(m => m.inc.usd), 1);
+	const maxExpP = Math.max(...monthData.map(m => m.expP), 1);
+	const maxIncP = Math.max(...monthData.map(m => m.incP), 1);
 
 	// ── Tabla comparativa ────────────────────────────────────────
 	let comp = '';
 	const BAR_W = 26;
-	comp += `${'Mes'.padEnd(12)}${'Gasto total'.padEnd(BAR_W + 2)}Ingreso\n`;
+	comp += `${'Mes'.padEnd(12)}${'Gasto'.padEnd(BAR_W + 2)}Ingreso\n`;
 	comp += '─'.repeat(72) + '\n';
 
 	for (const m of monthData) {
-		const expBar = bar(m.exp.rub, maxExpRub, BAR_W);
-		const incBar = bar(m.inc.usd, maxIncUsd, BAR_W);
-		const incRubApprox = m.inc.usd * rubPerUsd + m.inc.rub;
+		const expBar = bar(m.expP, maxExpP, BAR_W);
+		const incBar = bar(m.incP, maxIncP, BAR_W);
 
+		// Línea 1: barras
 		comp += `${m.label.padEnd(12)}${expBar}  ${incBar}\n`;
-		comp += `${' '.repeat(12)}`;
-		comp += `gasto: ${fmt(m.exp.rub)} ₽`;
-		if (m.inc.usd > 0) {
-			comp += `      ingreso: $${fmt(m.inc.usd)} (≈ ${fmt(incRubApprox)} ₽)`;
-		} else if (m.inc.rub > 0) {
-			comp += `      ingreso: ${fmt(m.inc.rub)} ₽`;
+
+		// Línea 2: moneda principal
+		const expPStr = `gasto: ${fmtCurrency(m.expP, primary)}`;
+		const incPStr = m.incP > 0 ? `ingreso: ${fmtCurrency(m.incP, primary)}` : '';
+		comp += ' '.repeat(12) + expPStr.padEnd(BAR_W + 2);
+		if (incPStr) comp += incPStr;
+		comp += '\n';
+
+		// Línea 3: moneda secundaria (alineada bajo la principal)
+		if (primary !== secondary) {
+			const expSStr = fmtCurrency(m.expS, secondary);
+			const incSStr = m.incS > 0 ? fmtCurrency(m.incS, secondary) : '';
+			comp += ' '.repeat(12) + expSStr.padEnd(BAR_W + 2);
+			if (incSStr) comp += incSStr;
+			comp += '\n';
 		}
-		comp += '\n\n';
+		comp += '\n';
 	}
 
-	// ── Tabla de gastos ──────────────────────────────────────────
+	// ── Tabla de gastos por categoría ────────────────────────────
 	const CAT_W = 24;
 
 	function buildCatTable(rows, label) {
-		const cats  = sumByCategory(rows);
-		const sorted = Object.entries(cats).sort((a, b) => b[1] - a[1]);
+		const catsP  = sumByCategory(rows, primary,   rates);
+		const catsS  = sumByCategory(rows, secondary, rates);
+		const sorted = Object.entries(catsP).sort((a, b) => b[1] - a[1]);
 		if (sorted.length === 0) return '';
 		const maxCat = sorted[0][1];
 		let t = label ? `── ${label} ──\n` : '';
 		for (const [cat, total] of sorted) {
-			const b = bar(total, maxCat, CAT_W);
-			t += `[${b}] ${cat} (${fmt(total)} ₽)\n`;
+			const b    = bar(total, maxCat, CAT_W);
+			const totalS = catsS[cat] || 0;
+			const secStr = primary !== secondary && totalS > 0 ? ` / ${fmtCurrency(totalS, secondary)}` : '';
+			t += `[${b}] ${cat} (${fmtCurrency(total, primary)}${secStr})\n`;
 		}
 		return t + '\n';
 	}
@@ -277,24 +342,35 @@ function generateReport(sections, rubPerUsd) {
 	}
 
 	// ── Observación ──────────────────────────────────────────────
-	const totalExp = sumRows(expRows);
-	const totalInc = sumRows(incRows);
-	const totalIncRub = totalInc.usd * rubPerUsd + totalInc.rub;
-	const balance    = totalIncRub - totalExp.rub;
-	const balSign    = balance >= 0 ? '+' : '';
+	const totalExpP = sumRowsIn(expRows, primary,   rates);
+	const totalIncP = sumRowsIn(incRows, primary,   rates);
+	const totalIncS = sumRowsIn(incRows, secondary, rates);
+	const balance   = totalIncP - totalExpP;
+	const balSign   = balance >= 0 ? '+' : '';
 
 	const periodStr = multiMonth
 		? `${monthLabel(months[0])}–${monthLabel(months[months.length - 1])}`
 		: monthLabel(months[0] || '');
 
-	let obs = `> 💡 **Período:** ${periodStr} · `;
-	obs += `Gasto total: **${fmt(totalExp.rub)} ₽** · `;
-	if (totalInc.usd > 0) {
-		obs += `Ingreso: **$${fmt(totalInc.usd)}** (≈ ${fmt(totalIncRub)} ₽ a ${fmt(rubPerUsd)} ₽/$) · `;
-	} else if (totalInc.rub > 0) {
-		obs += `Ingreso: **${fmt(totalInc.rub)} ₽** · `;
+	// Mostrar los tipos de cambio usados
+	let rateStr = '';
+	if (primary === 'RUB' || secondary === 'RUB') {
+		if (primary === 'USD' || secondary === 'USD') rateStr += ` · 1 USD = ${Math.round(rates.rubusd)} ₽`;
+		if (primary === 'EUR' || secondary === 'EUR') rateStr += ` · 1 EUR = ${Math.round(rates.rubeur)} ₽`;
+	} else if ((primary === 'USD' && secondary === 'EUR') || (primary === 'EUR' && secondary === 'USD')) {
+		rateStr += ` · 1 USD = ${rates.eurusd.toFixed(2)} EUR`;
 	}
-	obs += `Balance estimado: **${balSign}${fmt(balance)} ₽**`;
+
+	let obs = `> 💡 **Período:** ${periodStr}${rateStr} · `;
+	obs += `Gasto: **${fmtCurrency(totalExpP, primary)}** · `;
+	if (totalIncP > 0) {
+		obs += `Ingreso: **${fmtCurrency(totalIncP, primary)}**`;
+		if (secondary !== primary && totalIncS > 0) {
+			obs += ` (≈ ${fmtCurrency(totalIncS, secondary)})`;
+		}
+		obs += ` · `;
+	}
+	obs += `Balance: **${balSign}${fmtCurrency(balance, primary)}**`;
 
 	return { comp, catSection, obs };
 }
@@ -331,14 +407,14 @@ class ReporteFinanzasPlugin extends Plugin {
 			if (view) this._tryRender(view);
 		});
 
-		// Actualizar cuando cambia el frontmatter (ej: reporte: true/false)
+		// Actualizar cuando cambia el frontmatter (reporte, RUBUSD, moneda, etc.)
 		this.registerEvent(
 			this.app.metadataCache.on('changed', (file) => {
 				const view = this.app.workspace.getActiveViewOfType(MarkdownView);
 				if (!view || !view.file) return;
 				if (view.file.path !== file.path) return;
 				clearTimeout(this._debounce);
-				this._debounce = setTimeout(() => this._tryRender(view), 300);
+				this._debounce = setTimeout(() => this._tryRender(view, true), 300);
 			})
 		);
 
@@ -359,15 +435,15 @@ class ReporteFinanzasPlugin extends Plugin {
 		console.log('[Reporte Finanzas] Plugin descargado');
 	}
 
-	_tryRender(view) {
+	// force=true → recalcula siempre (cambio de frontmatter)
+	// force=false → solo genera si no hay reporte de datos previo
+	_tryRender(view, force = false) {
 		if (!view || !view.file) return;
 
-		// Verificar propiedad YAML reporte: true o 1
 		const cache = this.app.metadataCache.getFileCache(view.file);
 		const fm    = cache?.frontmatter;
 		if (!fm) return;
-		const reporteVal = fm.reporte;
-		if (!ReporteFinanzasPlugin._isActive(reporteVal)) return;
+		if (!ReporteFinanzasPlugin._isActive(fm.reporte)) return;
 
 		const editor  = view.editor;
 		const content = editor.getValue();
@@ -379,76 +455,53 @@ class ReporteFinanzasPlugin extends Plugin {
 		const sepIndex  = content.indexOf(sepMatch[0]);
 		const dataBlock = content.slice(sepIndex + sepMatch[0].length).trim();
 
-		// Si no hay nada debajo del separador, no hacer nada
 		if (!dataBlock) return;
 
-		// Detectar si la primera cabecera es AYUDA / HELP
-		const helpMatch = dataBlock.match(/^#\s+(AYUDA|HELP)\b/im);
-		if (helpMatch) {
-			const helpBlock = this._buildHelp();
-			this._injectAboveSep(editor, content, sepIndex, helpBlock);
+		const START     = '<!-- reporte-finanzas:inicio -->';
+		const END       = '<!-- reporte-finanzas:fin -->';
+		const HELP_MARK = '> **Reporte Finanzas \u2014 uso r\u00e1pido**';
+		const aboveSep  = content.slice(0, sepIndex);
+		const hasBlock  = aboveSep.includes(START);
+		const hasHelp   = hasBlock && aboveSep.includes(HELP_MARK);
+
+		// ── AYUDA / HELP ────────────────────────────────────────────
+		if (dataBlock.match(/^#\s+(AYUDA|HELP)\b/im)) {
+			// Solo insertar/actualizar la ayuda si no hay ya un reporte de datos
+			if (hasBlock && !hasHelp) return;
+			this._replaceBlock(editor, content, START, END, sepIndex, this._buildHelp());
 			return;
 		}
 
-		// Detectar si la primera cabecera es DATA / DATOS / INFO / CSV
-		const dataMatch = dataBlock.match(/^#\s+(DATA|DATOS|INFO|CSV)\b/im);
-		if (!dataMatch) return;
+		// ── DATA / DATOS / INFO / CSV ────────────────────────────────
+		if (!dataBlock.match(/^#\s+(DATA|DATOS|INFO|CSV)\b/im)) return;
 
-		// Extraer secciones — si no hay CSV real todavía, no hacer nada
+		// Sin CSV real todavía → no hacer nada
 		const sections = extractSections(dataBlock);
 		if (!sections || (!sections.expenses?.length && !sections.income?.length)) return;
 
-		// Solo omitir si ya hay un reporte de datos encima (no de ayuda)
-		const aboveSep = content.slice(0, sepIndex);
-		const START = '<!-- reporte-finanzas:inicio -->';
-		const HELP_MARKER = '> **Reporte Finanzas \u2014 uso r\u00e1pido**';
-		const hasBlock = aboveSep.includes(START);
-		const hasHelpBlock = hasBlock && aboveSep.includes(HELP_MARKER);
-		// Si hay reporte de datos real (no ayuda), no sobreescribir
-		if (hasBlock && !hasHelpBlock) return;
+		// Ya hay reporte de datos y no es forzado → no sobreescribir
+		if (hasBlock && !hasHelp && !force) return;
 
-		const rubPerUsd = getRates(fm);
-		const { comp, catSection, obs } = generateReport(sections, rubPerUsd);
+		const rates      = getRates(fm);
+		const currencies = parseCurrency(fm);
+		const { comp, catSection, obs } = generateReport(sections, rates, currencies);
 
-		const reportBlock = this._buildBlock(comp, catSection, obs);
-		this._inject(editor, content, sepIndex, reportBlock);
+		this._replaceBlock(editor, content, START, END, sepIndex, this._buildBlock(comp, catSection, obs));
 	}
 
-	_buildHelp() {
-		return [
-			'<!-- reporte-finanzas:inicio -->',
-			'> **Reporte Finanzas — uso rápido**',
-			'>',
-			'> 1. Añade `reporte: true` al frontmatter YAML.',
-			'> 2. Escribe una línea `----` como separador.',
-			'> 3. Debajo del `----` pon un encabezado `# DATA` (o `DATOS`, `INFO`, `CSV`)',
-			'>    y pega tus datos CSV de hledger (secciones `expenses` / `income`).',
-			'> 4. El reporte aparecerá automáticamente encima del `----`.',
-			'>',
-			'> Tipos de cambio opcionales en el frontmatter: `RUBUSD`, `RUBEUR`, `EURUSD`.',
-			'<!-- reporte-finanzas:fin -->',
-		].join('\n');
-	}
-
-	_injectAboveSep(editor, content, sepIndex, block) {
-		const START = '<!-- reporte-finanzas:inicio -->';
-		const END   = '<!-- reporte-finanzas:fin -->';
-
+	// Reemplaza el bloque START…END si existe, o lo inserta antes del separador
+	_replaceBlock(editor, content, START, END, sepIndex, block) {
 		const si = content.indexOf(START);
 		const ei = content.indexOf(END);
 
 		let newContent;
 		if (si !== -1 && ei !== -1) {
-			// Reemplazar bloque existente
-			const before = content.slice(0, si);
-			const after  = content.slice(ei + END.length);
-			newContent = before + block + after;
+			newContent = content.slice(0, si) + block + content.slice(ei + END.length);
 		} else {
-			// Insertar justo antes del separador ----
 			const fmEnd  = this._findFrontmatterEnd(content);
 			const before = content.slice(0, fmEnd).trimEnd();
 			const after  = content.slice(fmEnd).trimStart();
-			newContent = before + '\n\n' + block + '\n\n' + after;
+			newContent   = before + '\n\n' + block + '\n\n' + after;
 		}
 
 		if (newContent !== content) {
@@ -481,46 +534,28 @@ class ReporteFinanzasPlugin extends Plugin {
 		].join('\n');
 	}
 
-	_inject(editor, content, sepIndex, reportBlock) {
-		const START = '<!-- reporte-finanzas:inicio -->';
-		const END   = '<!-- reporte-finanzas:fin -->';
-
-		const si = content.indexOf(START);
-		const ei = content.indexOf(END);
-
-		let newContent;
-
-		if (si !== -1 && ei !== -1) {
-			// Reemplazar bloque existente (que está antes del separador)
-			const before = content.slice(0, si);
-			const after  = content.slice(ei + END.length);
-			newContent = before + reportBlock + after;
-		} else {
-			// Primera vez: insertar justo antes del separador ----
-			// Buscar el frontmatter para no insertarnos dentro de él
-			const fmEnd = this._findFrontmatterEnd(content);
-			const insertAt = Math.max(fmEnd, 0);
-
-			// Insertar el bloque entre el frontmatter y el "----"
-			const before = content.slice(0, insertAt).trimEnd();
-			const after  = content.slice(insertAt).trimStart();
-			newContent = before + '\n\n' + reportBlock + '\n\n' + after;
-		}
-
-		if (newContent !== content) {
-			const cursor = editor.getCursor();
-			editor.setValue(newContent);
-			// Restaurar cursor aproximado
-			try { editor.setCursor(cursor); } catch (_) {}
-		}
+	_buildHelp() {
+		return [
+			'<!-- reporte-finanzas:inicio -->',
+			'> **Reporte Finanzas \u2014 uso r\u00e1pido**',
+			'>',
+			'> 1. A\u00f1ade `reporte: true` al frontmatter YAML.',
+			'> 2. Escribe una l\u00ednea `----` como separador.',
+			'> 3. Debajo del `----` pon un encabezado `# DATA` (o `DATOS`, `INFO`, `CSV`)',
+			'>    y pega tus datos CSV de hledger (secciones `expenses` / `income`).',
+			'> 4. El reporte aparece autom\u00e1ticamente encima del `----`.',
+			'>',
+			'> **Moneda:** `moneda: RUB, USD` (principal, secundaria). Opciones: RUB, USD, EUR.',
+			'> **Tipos de cambio:** `RUBUSD: 90` · `RUBEUR: 95` · `EURUSD: 1.05`',
+			'<!-- reporte-finanzas:fin -->',
+		].join('\n');
 	}
 
 	_findFrontmatterEnd(content) {
-		// El frontmatter YAML empieza con "---\n" y termina con "\n---\n"
 		if (!content.startsWith('---')) return 0;
 		const end = content.indexOf('\n---', 3);
 		if (end === -1) return 0;
-		return end + 4; // justo después del "---\n" de cierre
+		return end + 4;
 	}
 }
 
