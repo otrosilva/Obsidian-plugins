@@ -1,0 +1,39 @@
+/*
+ * Estilo visual para checkboxes "- [>]" (tareas aplazadas/reprogramadas).
+ * Cubre Reading mode y Live Preview (CodeMirror 6), donde Obsidian expone
+ * el carácter del checkbox a través del atributo data-task.
+ */
+
+input.task-list-item-checkbox[data-task=">"],
+input[data-task=">"] {
+	appearance: none;
+	-webkit-appearance: none;
+	width: 1.1em;
+	height: 1.1em;
+	border: 1.5px solid var(--text-faint);
+	border-radius: 3px;
+	position: relative;
+	cursor: pointer;
+	background: transparent;
+	background-image: none;
+}
+
+input.task-list-item-checkbox[data-task=">"]::after,
+input[data-task=">"]::after {
+	content: "→";
+	position: absolute;
+	inset: 0;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	font-size: 0.85em;
+	line-height: 1;
+	color: var(--text-faint);
+}
+
+.HyperMD-task-line[data-task=">"],
+li[data-task=">"],
+.task-list-item[data-task=">"] {
+	color: var(--text-faint);
+	opacity: 0.75;
+}
